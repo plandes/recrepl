@@ -1,0 +1,320 @@
+#!/usr/bin/perl
+# $Id$
+
+# Copyright (C) 1998 - 2019
+# 2008, 2009 by Paul Landes
+# Written by Paul Landes
+
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+
+# You should have received a copy of the GNU General Public License
+# along with this program; see the file COPYING.  If not, write to the
+# Free Software Foundation, Inc., 59 Temple Place - Suite 330,
+# Boston, MA 02111-1307, USA.
+
+use Pod::Usage;
+
+@opDecl = (
+	   ["q", "quiet", "f"],
+	   ["b", "backup", "t"],
+	   ["r", "replace", "t"],
+	   ["f", "filepat", "t"],
+	   ["p", "printdir", "f"],
+	   ["d", "directory", "t"],
+	   ["c", "clearcase", "t"],
+	   ["n", "nofail", "f"],
+	   ["v", "version", "f"],
+	   ["h", "help", "f"]
+	   );
+$PROG = "recrepl";
+
+# subvserion populates this
+$_ = q/$Revision$/;
+/\$Revision: (\d+) \$/;
+$versionStr = $1;
+$clearCaseCommand = "/usr/atria/bin/cleartool";
+
+sub readFile {
+  my $file = @_[0];
+  my @ret;
+  open(FILE, "$file") or die "Can't open file $file for read: $!";
+  while(<FILE>) { push @ret, $_; }
+  close FILE;
+  return @ret;
+}
+
+sub writeFile {
+  my ($file, $cont, $cccomment, $nofail) = @_;
+  my $i;
+
+  if ( defined $cccomment ) {
+    my $cmd = "$clearCaseCommand co -c '$cccomment' $file";
+    print "$cmd\n";
+    system($cmd);
+  }
+
+  if (!open(FILE, ">$file")) {
+    my $msg = "Can't open file $file for write: $!";
+    if ($nofail) {
+      warn("WARNING: " . $msg);
+    }
+    else {
+      die $msg;
+    }
+  } else {
+    for($i = 0; $cont->[$i]; $i++) {
+      print FILE $cont->[$i];
+    }
+    close FILE;
+  }
+
+#  if ( defined $cccomment ) {
+#    my $cmd = "$clearCaseCommand ci -c '$cccomment' $file";
+#    print "$cmd\n";
+#    system($cmd);
+#  }
+}
+
+sub incFileName {
+  my $name = @_[0];
+  my ($mod, $dir, $count);
+  $name = $name;
+  if (-f $name) {
+    $_ = $name;
+    s/(.*)\/(.*)$/$1 $2/;
+    $dir = $1;
+    $name = $2 . "1";
+    while(-f $dir . "/" . $name) {
+      $_ = $name;
+      if (s/(.*)(\d+)/$1 $2/) {
+	$count = $2 + 1;
+	$name = "$1" . $count;
+      }
+    }
+    $name = $dir . "/" . $name;
+  }
+  return $name;
+}
+
+sub doReplace {
+  my ($file, $pat, $repl, $cccomment, $nofail, @fMod) = @_;
+  if ($ops->{backup}) {
+    my ($bakfile, $delim);
+    $_ = $file;
+    s/.*\/(.*)/$1/;
+    if ( $ops->{backup} =~ /^\// ) {
+      if ( $ops->{backup} !~ /\/$/ ) { $delim = "/"; }
+      else { $delim = ""; }
+      $bakfile = $ops->{backup} . $delim . $_;
+    } else {
+      $bakfile = $ops->{directory} . "/$ops->{backup}/" . $_;
+    }
+    $bakfile = incFileName($bakfile);
+    writeFile($bakfile, \@fMod, undef, $nofail);
+  }
+
+  for($i = 0; $fMod[$i]; $i++) {
+    $_ = $fMod[$i];
+    my $evalStr = "s/$pat/$repl/g;";
+    eval $evalStr;
+    $fMod[$i] = $_;
+  }
+  writeFile($file, \@fMod, $cccomment, $nofail);
+}
+
+sub fileop {
+  my ($file, $pat, $repl, $cccomment, $nofail) = @_;
+  my @fContent;
+  @fContent = readFile($file);
+  my $fprinted = 0;
+  foreach $_ (@fContent) {
+    if (/$pat/) {
+      my $oldtext = $_;
+      if ($fprinted == 0) {
+	$fprinted = 1;
+	print "$file";
+	if (!$ops->{quiet}) { print ":"; }
+	print "\n";
+	if (defined $repl) {
+	  doReplace($file, $pat, $repl, $cccomment, $nofail, @fContent);
+	}
+      }
+      if (!$ops->{quiet}) { print $oldtext; }
+    }
+  }
+}
+
+sub recurseDir {
+  my ($dir, $fpat, $pat, $repl, $cccomment, $nofail) = @_;
+  if ($ops->{printdir} eq "t") { print "traversing $dir\n"; }
+  opendir DIR, $dir or die "Can't open directory $dir: $!";
+  my @files = readdir DIR;
+  closedir DIR;
+  my $f;
+  foreach $f (@files) {
+    if ( ($f eq ".") or ($f eq "..") or ($f eq ".svn") ) { next; }
+    if (-f "$dir/$f") {
+      #print "$_, $fpat\n";
+      $_ = $f;
+      if ((!defined $fpat) || /$fpat/) {
+	#print "match\n";
+	fileop("$dir/$f", $pat, $repl, $cccomment, $nofail);
+      }
+    }
+    elsif (-d "$dir/$f")
+      { recurseDir("$dir/$f", $fpat, $pat, $repl, $cccomment, $nofail); }
+  }
+}
+
+sub parseOps {
+  my $opr = @_[0];
+  FORA: for(; $_ = $ARGV[0]; shift @ARGV) {
+    if ( !(/^-|^--/) ) { last FORA; }
+  FOR: for($i = 0; $i < $#opDecl+1; $i++) {
+      if (/^-$opDecl[$i][0]$/|/^--$opDecl[$i][1]$/) {
+	if ($opDecl[$i][2] eq "t") {
+	  $opr->{$opDecl[$i][1]} = $ARGV[1];
+	  shift @ARGV;
+	}
+	else { $opr->{$opDecl[$i][1]} = "t"; }
+	last FOR;
+      }#if
+    }#FOR for
+
+  }
+}
+
+sub main {
+  $ops = {};
+  if ($#ARGV < 0) {
+      pod2usage( { -exitval => 0,
+		   -verbose => 0,
+		   -output  => \*STDOUT } );
+  }
+  $ops->{directory} = `pwd`;
+  chop($ops->{directory});
+  parseOps($ops);
+  $ops->{trig} = $ARGV[0];
+  if ($ops->{help}) {
+      pod2usage( { -exitval => 0,
+		   -verbose => 1,
+		   -output  => \*STDOUT } );
+  }
+  elsif ($ops->{version}) {
+      print "v$versionStr\n";
+      exit 0;
+  }
+  elsif ( ($ops->{backup}) && !(-d $ops->{backup}) ) {
+    $err = "$PROG: backup directory `$ops->{backup}' does not exist.";
+    pod2usage( { -message => $err,
+		 -exitval => 1,
+		 -verbose => 0,
+		 -output  => \*STDERR } );
+  }
+  recurseDir($ops->{directory}, $ops->{filepat},
+	     $ops->{trig}, $ops->{replace}, $ops->{clearcase},
+	     $ops->{nofail});
+}
+
+main();
+
+__END__
+
+=head1 NAME
+
+recrepl - recursively find and/or replace text with PERL regular expressions
+
+=head1 SYNOPSIS
+
+    recrepl [ -v | --version ]
+
+    recrepl [ -r | --replace <replace pattern> ]
+            [ -q | --quiet ] [ -b | --backup <directory> ]
+            [ -f | --filepat <file pattern> ] [ -p | --printdir ]
+            [ -d | --directory <directory to start> ] |
+            [ -c | --clearcase <clear case checkout comment> ] |
+            [ -n | --nofail ]
+            <find pattern>
+
+
+=head1 DESCRIPTION
+
+Recursive replace tool looks for and cites <find pattern> in
+every file.  This is a regular expression (can be just a string).  This
+string is replaced in every occurance if -r is used.
+
+
+=head1 OPTIONS
+
+=over 8
+
+=item B<-r, --replace> I<replace pattern>
+
+Replace the string with <replace pattern> if supplied.
+
+=item B<-q, --quiet>
+
+Do not produce very little output.
+
+=item B<-b, --backup>
+
+the directory name to copy original files that are to be modified.  If not
+given, no original files are saved.  If a file is already found in this
+directory when another is to be copied in, then the file to be copied is
+enumerated at the end.
+
+=item B<-f, --filepat> I<find pattern>
+
+The regular expression of the file to look for I<find pattern>.  The default is
+every file.
+
+=item B<-p, --printdir>
+
+Print the directory that is being recursively traversed into.
+
+=item B<-d, --directory>
+
+Which directory to start at.  The default is the current directory.
+
+=item B<-c, --clearcase>
+
+The clearcase comment for checkout and check in.
+This uses clearcase to checkout the file after any substitution
+only if there is a substitution to make.  Note: this does _not_
+check the file in so that the user can confirm correct changes
+before being committed to clearcase.
+
+=item B<-v, --version>
+
+Print the version and exit.
+
+=back
+
+
+=head1 COPYRIGHT
+
+Copyright (C) 1998 - 2019 by Paul Landes
+
+This program is free software; you can redistribute it and/or modify
+it under the terms of the GNU General Public License as published by
+the Free Software Foundation; either version 2 of the License, or
+(at your option) any later version.
+
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+GNU General Public License for more details.
+
+You should have received a copy of the GNU General Public License
+along with this program; see the file COPYING.  If not, write to the
+Free Software Foundation, Inc., 59 Temple Place - Suite 330,
+Boston, MA 02111-1307, USA.
+
+=head1 AUTHOR
+
+Paul Landes <landes at mailc dot net>
+
+=cut
