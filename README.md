@@ -23,6 +23,4 @@ Copyright (C) 2009 - 2019  Paul Landes
 
 
 <!-- links -->
-[synconf.el]: https://github.com/plandes/synconf/blob/master/synconf.el
-[choice-program]: https://github.com/plandes/choice-program
 [Pod Documentation]: doc/pod.md
